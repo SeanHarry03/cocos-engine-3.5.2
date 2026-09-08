@@ -25,6 +25,7 @@
 
 import { Vec3 } from '../../../core/math';
 import { Material } from '../../../core/assets/material';
+import type { Node } from '../../../core/scene-graph/node';
 import { IAssembler } from '../../renderer/base';
 import { IRenderData, RenderData } from '../../renderer/render-data';
 import { IBatcher } from '../../renderer/i-batcher';
@@ -40,8 +41,10 @@ for (let i = 0; i < 4; i++) {
 
 interface ISharedSimpleSourceState {
     sourceSprite: Sprite;
+    renderData: RenderData;
     preparedFrame: number;
     initialized: boolean;
+    version: number;
     rectVersion: number;
     uvVersion: number;
     batchVersion: number;
@@ -64,21 +67,18 @@ interface ISharedSimpleSourceState {
 }
 
 interface ISharedSimpleCopyState {
+    sourceNode: Node;
+    copyNode: Node;
     sourceSprite: Sprite;
+    copySprite: Sprite;
+    sourceState: ISharedSimpleSourceState;
+    renderData: RenderData;
     chunk: StaticVBChunk;
+    version: number;
     rectVersion: number;
     uvVersion: number;
     batchVersion: number;
-    colorR: number;
-    colorG: number;
-    colorB: number;
-    colorA: number;
 }
-
-// RenderData is pooled. WeakMaps keep shared-only metadata out of the pooled objects
-// and the sprite/chunk guards below protect against a recycled RenderData entry.
-const sharedSourceStates = new WeakMap<RenderData, ISharedSimpleSourceState>();
-const sharedCopyStates = new WeakMap<RenderData, ISharedSimpleCopyState>();
 
 /**
  * simple 组装器
@@ -293,10 +293,10 @@ export const simple: IAssembler = {
         }
     },
 
-    fillSharedBuffers (sourceSprite: Sprite, copySprite: Sprite, renderer: IBatcher) {
+    createSharedBinding (sourceSprite: Sprite, copySprite: Sprite) {
         const frame = sourceSprite.spriteFrame;
         if (!frame) {
-            return;
+            return null;
         }
 
         let sourceRenderData = sourceSprite.renderData!;
@@ -309,12 +309,15 @@ export const simple: IAssembler = {
             copyRenderData = this.createData(copySprite);
         }
 
-        let sourceState = sharedSourceStates.get(sourceRenderData);
-        if (!sourceState || sourceState.sourceSprite !== sourceSprite) {
+        const sourceNode = sourceSprite.node;
+        let sourceState = sourceNode._sharedRenderSourceState as ISharedSimpleSourceState | null;
+        if (!sourceState || sourceState.sourceSprite !== sourceSprite || sourceState.renderData !== sourceRenderData) {
             sourceState = {
                 sourceSprite,
+                renderData: sourceRenderData,
                 preparedFrame: -1,
                 initialized: false,
+                version: 0,
                 rectVersion: 0,
                 uvVersion: 0,
                 batchVersion: 0,
@@ -335,17 +338,57 @@ export const simple: IAssembler = {
                 blendHash: -1,
                 textureHash: 0,
             };
-            sharedSourceStates.set(sourceRenderData, sourceState);
+            sourceNode._sharedRenderSourceState = sourceState;
+        }
+
+        this.updateColor(copySprite);
+        (copyRenderData as any)._sharedOpacityDirty = true;
+
+        const copyState: ISharedSimpleCopyState = {
+            sourceNode,
+            copyNode: copySprite.node,
+            sourceSprite,
+            copySprite,
+            sourceState,
+            renderData: copyRenderData,
+            chunk: copyRenderData.chunk,
+            version: -1,
+            rectVersion: -1,
+            uvVersion: -1,
+            batchVersion: -1,
+        };
+        return copyState;
+    },
+
+    fillSharedBuffersFast (copyState: ISharedSimpleCopyState, renderer: IBatcher) {
+        const sourceSprite = copyState.sourceSprite;
+        const copySprite = copyState.copySprite;
+        const sourceState = copyState.sourceState;
+        const sourceRenderData = sourceState.renderData;
+        const copyRenderData = copyState.renderData;
+
+        // Sprite type changes and assembler flushes recreate RenderData. Chunk changes
+        // also require a full binding rebuild so stale buffer views are never reused.
+        if (sourceSprite.renderData !== sourceRenderData || copySprite.renderData !== copyRenderData
+            || copyRenderData.chunk !== copyState.chunk) {
+            return false;
         }
 
         // All copies of a source observe the same source state. Prepare and compare
         // that state only for the first copy encountered during this UI frame.
         if (sourceState.preparedFrame !== renderer.sharedFrameId) {
+            const frame = sourceSprite.spriteFrame;
+            const material = sourceSprite.getRenderMaterial(0);
+            if (!frame || !frame.texture || !material) {
+                return false;
+            }
+
             if (sourceRenderData.vertDirty || sourceRenderData.passDirty || sourceRenderData.textureDirty
                 || sourceRenderData.nodeDirty || sourceRenderData.hashDirty) {
                 this.updateRenderData(sourceSprite);
             }
 
+            let sourceChanged = false;
             const sourceData = sourceRenderData.data;
             const l = sourceData[0].x;
             const b = sourceData[0].y;
@@ -358,6 +401,7 @@ export const simple: IAssembler = {
                 sourceState.r = r;
                 sourceState.t = t;
                 ++sourceState.rectVersion;
+                sourceChanged = true;
             }
 
             const uv = frame.uv;
@@ -375,9 +419,9 @@ export const simple: IAssembler = {
                 sourceState.uv6 = uv[6];
                 sourceState.uv7 = uv[7];
                 ++sourceState.uvVersion;
+                sourceChanged = true;
             }
 
-            const material = sourceSprite.getRenderMaterial(0);
             const textureHash = frame.getHash();
             if (!sourceState.initialized || sourceState.frame !== frame || sourceState.material !== material
                 || sourceState.blendHash !== sourceSprite.blendHash || sourceState.textureHash !== textureHash) {
@@ -386,90 +430,60 @@ export const simple: IAssembler = {
                 sourceState.blendHash = sourceSprite.blendHash;
                 sourceState.textureHash = textureHash;
                 ++sourceState.batchVersion;
+                sourceChanged = true;
+            }
+            if (sourceChanged) {
+                ++sourceState.version;
             }
 
             sourceState.initialized = true;
             sourceState.preparedFrame = renderer.sharedFrameId;
         }
 
-        let copyState = sharedCopyStates.get(copyRenderData);
-        if (!copyState || copyState.sourceSprite !== sourceSprite || copyState.chunk !== copyRenderData.chunk) {
-            copyState = {
-                sourceSprite,
-                chunk: copyRenderData.chunk,
-                rectVersion: -1,
-                uvVersion: -1,
-                batchVersion: -1,
-                colorR: -1,
-                colorG: -1,
-                colorB: -1,
-                colorA: -1,
-            };
-            sharedCopyStates.set(copyRenderData, copyState);
+        // Stable copies take one total-version comparison. Sub-version checks only
+        // run after the source actually changes or when a binding is initialized.
+        if (copyState.version !== sourceState.version) {
+            if (copyState.rectVersion !== sourceState.rectVersion) {
+                const copyData = copyRenderData.data;
+                copyData[0].x = sourceState.l;
+                copyData[0].y = sourceState.b;
+                copyData[1].x = sourceState.r;
+                copyData[1].y = sourceState.t;
+                copyRenderData.vertDirty = true;
+                copyState.rectVersion = sourceState.rectVersion;
+            }
+
+            if (copyState.uvVersion !== sourceState.uvVersion) {
+                const vData = copyState.chunk.vb;
+                vData[3] = sourceState.uv0;
+                vData[4] = sourceState.uv1;
+                vData[12] = sourceState.uv2;
+                vData[13] = sourceState.uv3;
+                vData[21] = sourceState.uv4;
+                vData[22] = sourceState.uv5;
+                vData[30] = sourceState.uv6;
+                vData[31] = sourceState.uv7;
+                copyState.uvVersion = sourceState.uvVersion;
+            }
+
+            if (copyState.batchVersion !== sourceState.batchVersion) {
+                copyRenderData.updatePass(sourceSprite);
+                copyRenderData.updateTexture(sourceState.frame);
+                copyState.batchVersion = sourceState.batchVersion;
+            }
+            copyState.version = sourceState.version;
         }
 
-        if (copyState.rectVersion !== sourceState.rectVersion) {
-            const copyData = copyRenderData.data;
-            copyData[0].x = sourceState.l;
-            copyData[0].y = sourceState.b;
-            copyData[1].x = sourceState.r;
-            copyData[1].y = sourceState.t;
-            copyRenderData.vertDirty = true;
-            copyState.rectVersion = sourceState.rectVersion;
-        }
-
-        if (copyState.uvVersion !== sourceState.uvVersion) {
-            const vData = copyRenderData.chunk.vb;
-            vData[3] = sourceState.uv0;
-            vData[4] = sourceState.uv1;
-            vData[12] = sourceState.uv2;
-            vData[13] = sourceState.uv3;
-            vData[21] = sourceState.uv4;
-            vData[22] = sourceState.uv5;
-            vData[30] = sourceState.uv6;
-            vData[31] = sourceState.uv7;
-            copyState.uvVersion = sourceState.uvVersion;
-        }
-
-        if (copyState.batchVersion !== sourceState.batchVersion || copyRenderData.passDirty) {
-            copyRenderData.updatePass(sourceSprite);
-        }
-        if (copyState.batchVersion !== sourceState.batchVersion || copyRenderData.textureDirty) {
-            copyRenderData.updateTexture(sourceState.frame);
-        }
-        copyState.batchVersion = sourceState.batchVersion;
-
-        if (copyRenderData.nodeDirty || copyRenderData.layer !== copySprite.node.layer) {
+        // Copy material/texture are intentionally ignored by shared rendering.
+        // Their dirty flags are consumed only when source batch state is applied.
+        if (copyRenderData.nodeDirty) {
             copyRenderData.updateNode(copySprite);
         }
         if (copyRenderData.hashDirty) {
             copyRenderData.updateHash();
         }
 
-        const color = copySprite.color;
-        if (copyState.colorR !== color.r || copyState.colorG !== color.g
-            || copyState.colorB !== color.b || copyState.colorA !== color.a) {
-            this.updateColor(copySprite);
-            (copyRenderData as any)._sharedOpacityDirty = true;
-            copyState.colorR = color.r;
-            copyState.colorG = color.g;
-            copyState.colorB = color.b;
-            copyState.colorA = color.a;
-        }
-
         renderer.commitSharedComp(sourceSprite, copySprite, copyRenderData, sourceState.frame, this, null);
-
-        /**
-         *  共享:
-            图片形状
-            UV
-            纹理
-            材质
-
-            不共享:
-            copy 的 color
-            copy 的 alpha
-            copy 的 worldMatrix
-         */
+        return true;
     },
 };

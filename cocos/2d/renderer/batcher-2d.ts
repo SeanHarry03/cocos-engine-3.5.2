@@ -720,8 +720,19 @@ export class Batcher2D implements IBatcher {
 
         // Render assembler update logic
         if (render && render.enabledInHierarchy) {
-            if (node._sharedRenderSource) {
-                this.walkShare(node, node._sharedRenderSource);
+            const sharedSource = node._sharedRenderSource;
+            if (sharedSource) {
+                const binding = node._sharedRenderBinding;
+                if (binding && binding.sourceNode === sharedSource && binding.copyNode === node
+                    && binding.copySprite === render) {
+                    if (binding.sourceSprite.enabledInHierarchy && selfOpacity > 0
+                        && !binding.assembler.fillSharedBuffersFast(binding, this)) {
+                        node._sharedRenderBinding = null;
+                        this.walkShare(node, sharedSource);
+                    }
+                } else if (selfOpacity > 0) {
+                    this.walkShare(node, sharedSource);
+                }
             } else {
                 render.updateAssembler(this);
             }
@@ -779,20 +790,25 @@ export class Batcher2D implements IBatcher {
             return;
         }
 
-        if (copyRender.color.a <= 0) {
-            return;
-        }
-
         if (!sourceRender.spriteFrame || !sourceRender.spriteFrame.texture || !sourceRender.getRenderMaterial(0)) {
             return;
         }
 
         const assembler = sourceRender.assembler;
-        if (!assembler || typeof assembler.fillSharedBuffers !== 'function') {
+        if (!assembler || typeof assembler.createSharedBinding !== 'function'
+            || typeof assembler.fillSharedBuffersFast !== 'function') {
             return;
         }
 
-        assembler.fillSharedBuffers(sourceRender, copyRender, this);
+        const binding = assembler.createSharedBinding(sourceRender, copyRender);
+        if (!binding) {
+            return;
+        }
+        binding.assembler = assembler;
+        copyNode._sharedRenderBinding = binding;
+        if (!assembler.fillSharedBuffersFast(binding, this)) {
+            copyNode._sharedRenderBinding = null;
+        }
     }
 
     private _screenSort(a: RenderRoot2D, b: RenderRoot2D) {

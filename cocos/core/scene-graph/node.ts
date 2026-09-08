@@ -289,11 +289,13 @@ export class Node extends BaseNode implements CustomSerializable {
             for (const child of copyChilds) {
                 if (child._sharedRenderSource === this) {
                     child._sharedRenderSource = null;
+                    child._sharedRenderBinding = null;
                 }
             }
             copyChilds.length = 0;
             this.copyChidrens = null;
         }
+        this._sharedRenderSourceState = null;
 
         const sharedRenderSource = this._sharedRenderSource;
         if (sharedRenderSource && sharedRenderSource.copyChidrens) {
@@ -305,6 +307,7 @@ export class Node extends BaseNode implements CustomSerializable {
                 sharedRenderSource.copyChidrens = null;
             }
             this._sharedRenderSource = null;
+            this._sharedRenderBinding = null;
         }
         return result;
     }
@@ -1425,6 +1428,7 @@ export class Node extends BaseNode implements CustomSerializable {
         nodes.push(node);
         // node.setParent(this);
         node._sharedRenderSource = this;
+        node._sharedRenderBinding = null;
     }
 
     public removeCopyChildren(node: Node) {
@@ -1435,9 +1439,11 @@ export class Node extends BaseNode implements CustomSerializable {
             fastRemoveAt(nodes, index);
             if (node._sharedRenderSource === this) {
                 node._sharedRenderSource = null;
+                node._sharedRenderBinding = null;
             }
             if (nodes.length === 0) {
                 this.copyChidrens = null;
+                this._sharedRenderSourceState = null;
             }
         }
     }
@@ -1446,6 +1452,10 @@ export class Node extends BaseNode implements CustomSerializable {
 
     /**共享节点源数据 */
     public _sharedRenderSource: Node | null = null;
+
+    /** 2D renderer-owned caches. Kept untyped here to avoid a core -> 2D dependency. */
+    public _sharedRenderBinding: any = null;
+    public _sharedRenderSourceState: any = null;
 
     //#endregion
 }
