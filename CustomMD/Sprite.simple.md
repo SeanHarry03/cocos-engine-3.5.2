@@ -5,6 +5,8 @@
 
 目标是让多个 copy 节点复用 source 节点的 Sprite 静态渲染数据，减少每个 copy 重复计算 `SpriteFrame`、局部顶点、UV、材质和纹理状态的成本。当前实现仍然基于 Cocos 原有 2D CPU batching，因此每个 copy 仍需要自己的 `renderData/chunk`，也仍需要根据自己的 `worldMatrix` 写入最终顶点。
 
+实测2000个copy节点，render有上升1ms。仅作为学习Sprite渲染
+
 ## 1. 涉及脚本
 
 ### 引擎源码
