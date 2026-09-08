@@ -115,6 +115,9 @@ export class Batcher2D implements IBatcher {
     private _pOpacity = 1;
     private _opacityDirty = 0;
 
+    /** Frame token used by shared render data to prepare a source only once per UI frame. */
+    public sharedFrameId = 0;
+
     // DescriptorSet Cache Map
     private _descriptorSetCache = new DescriptorSetCache();
 
@@ -251,6 +254,7 @@ export class Batcher2D implements IBatcher {
     }
 
     public reset() {
+        ++this.sharedFrameId;
         // Reset batches
         for (let i = 0; i < this._batches.length; ++i) {
             const batch = this._batches.array[i];

@@ -15,6 +15,7 @@ import { UIMeshRenderer } from '../components/ui-mesh-renderer';
 export interface IBatcher {
     currBufferAccessor: StaticVBAccessor;
     readonly batches: CachedArray<DrawBatch2D>;
+    readonly sharedFrameId: number;
     // registerCustomBuffer (attributes: MeshBuffer | Attribute[], callback: ((...args: number[]) => void) | null) : MeshBuffer;
     // unRegisterCustomBuffer (buffer: MeshBuffer);
 

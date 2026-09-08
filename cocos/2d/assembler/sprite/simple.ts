@@ -24,10 +24,12 @@
 */
 
 import { Vec3 } from '../../../core/math';
+import { Material } from '../../../core/assets/material';
 import { IAssembler } from '../../renderer/base';
 import { IRenderData, RenderData } from '../../renderer/render-data';
 import { IBatcher } from '../../renderer/i-batcher';
 import { Sprite } from '../../components';
+import { SpriteFrame } from '../../assets/sprite-frame';
 import { dynamicAtlasManager } from '../../utils/dynamic-atlas/atlas-manager';
 import { StaticVBChunk } from '../../renderer/static-vb-accessor';
 
@@ -36,7 +38,47 @@ for (let i = 0; i < 4; i++) {
     vec3_temps.push(new Vec3());
 }
 
-const SHARED_SIMPLE_STATE = '_sharedSimpleState';
+interface ISharedSimpleSourceState {
+    sourceSprite: Sprite;
+    preparedFrame: number;
+    initialized: boolean;
+    rectVersion: number;
+    uvVersion: number;
+    batchVersion: number;
+    l: number;
+    b: number;
+    r: number;
+    t: number;
+    uv0: number;
+    uv1: number;
+    uv2: number;
+    uv3: number;
+    uv4: number;
+    uv5: number;
+    uv6: number;
+    uv7: number;
+    frame: SpriteFrame;
+    material: Material | null;
+    blendHash: number;
+    textureHash: number;
+}
+
+interface ISharedSimpleCopyState {
+    sourceSprite: Sprite;
+    chunk: StaticVBChunk;
+    rectVersion: number;
+    uvVersion: number;
+    batchVersion: number;
+    colorR: number;
+    colorG: number;
+    colorB: number;
+    colorA: number;
+}
+
+// RenderData is pooled. WeakMaps keep shared-only metadata out of the pooled objects
+// and the sprite/chunk guards below protect against a recycled RenderData entry.
+const sharedSourceStates = new WeakMap<RenderData, ISharedSimpleSourceState>();
+const sharedCopyStates = new WeakMap<RenderData, ISharedSimpleCopyState>();
 
 /**
  * simple 组装器
@@ -251,10 +293,7 @@ export const simple: IAssembler = {
         }
     },
 
-    fillSharedBuffers(sourceSprite: Sprite, copySprite: Sprite, renderer: IBatcher) {
-        if (sourceSprite === null || copySprite === null) {
-            return;
-        }
+    fillSharedBuffers (sourceSprite: Sprite, copySprite: Sprite, renderer: IBatcher) {
         const frame = sourceSprite.spriteFrame;
         if (!frame) {
             return;
@@ -270,17 +309,15 @@ export const simple: IAssembler = {
             copyRenderData = this.createData(copySprite);
         }
 
-        if (sourceRenderData.vertDirty || sourceRenderData.passDirty || sourceRenderData.textureDirty || sourceRenderData.nodeDirty || sourceRenderData.hashDirty) {
-            this.updateRenderData(sourceSprite);
-        }
-        //对应原流程 updateVertexData
-        const copyRenderDataAny = copyRenderData as any;
-        let sharedState = copyRenderDataAny[SHARED_SIMPLE_STATE];
-        if (!sharedState || sharedState.copySprite !== copySprite || sharedState.chunk !== copyRenderData.chunk) {
-            sharedState = copyRenderDataAny[SHARED_SIMPLE_STATE] = {
-                copySprite,
-                chunk: copyRenderData.chunk,
+        let sourceState = sharedSourceStates.get(sourceRenderData);
+        if (!sourceState || sourceState.sourceSprite !== sourceSprite) {
+            sourceState = {
+                sourceSprite,
+                preparedFrame: -1,
                 initialized: false,
+                rectVersion: 0,
+                uvVersion: 0,
+                batchVersion: 0,
                 l: 0,
                 b: 0,
                 r: 0,
@@ -293,90 +330,134 @@ export const simple: IAssembler = {
                 uv5: 0,
                 uv6: 0,
                 uv7: 0,
+                frame,
+                material: null,
+                blendHash: -1,
+                textureHash: 0,
+            };
+            sharedSourceStates.set(sourceRenderData, sourceState);
+        }
+
+        // All copies of a source observe the same source state. Prepare and compare
+        // that state only for the first copy encountered during this UI frame.
+        if (sourceState.preparedFrame !== renderer.sharedFrameId) {
+            if (sourceRenderData.vertDirty || sourceRenderData.passDirty || sourceRenderData.textureDirty
+                || sourceRenderData.nodeDirty || sourceRenderData.hashDirty) {
+                this.updateRenderData(sourceSprite);
+            }
+
+            const sourceData = sourceRenderData.data;
+            const l = sourceData[0].x;
+            const b = sourceData[0].y;
+            const r = sourceData[1].x;
+            const t = sourceData[1].y;
+            if (!sourceState.initialized || sourceState.l !== l || sourceState.b !== b
+                || sourceState.r !== r || sourceState.t !== t) {
+                sourceState.l = l;
+                sourceState.b = b;
+                sourceState.r = r;
+                sourceState.t = t;
+                ++sourceState.rectVersion;
+            }
+
+            const uv = frame.uv;
+            if (!sourceState.initialized
+                || sourceState.uv0 !== uv[0] || sourceState.uv1 !== uv[1]
+                || sourceState.uv2 !== uv[2] || sourceState.uv3 !== uv[3]
+                || sourceState.uv4 !== uv[4] || sourceState.uv5 !== uv[5]
+                || sourceState.uv6 !== uv[6] || sourceState.uv7 !== uv[7]) {
+                sourceState.uv0 = uv[0];
+                sourceState.uv1 = uv[1];
+                sourceState.uv2 = uv[2];
+                sourceState.uv3 = uv[3];
+                sourceState.uv4 = uv[4];
+                sourceState.uv5 = uv[5];
+                sourceState.uv6 = uv[6];
+                sourceState.uv7 = uv[7];
+                ++sourceState.uvVersion;
+            }
+
+            const material = sourceSprite.getRenderMaterial(0);
+            const textureHash = frame.getHash();
+            if (!sourceState.initialized || sourceState.frame !== frame || sourceState.material !== material
+                || sourceState.blendHash !== sourceSprite.blendHash || sourceState.textureHash !== textureHash) {
+                sourceState.frame = frame;
+                sourceState.material = material;
+                sourceState.blendHash = sourceSprite.blendHash;
+                sourceState.textureHash = textureHash;
+                ++sourceState.batchVersion;
+            }
+
+            sourceState.initialized = true;
+            sourceState.preparedFrame = renderer.sharedFrameId;
+        }
+
+        let copyState = sharedCopyStates.get(copyRenderData);
+        if (!copyState || copyState.sourceSprite !== sourceSprite || copyState.chunk !== copyRenderData.chunk) {
+            copyState = {
+                sourceSprite,
+                chunk: copyRenderData.chunk,
+                rectVersion: -1,
+                uvVersion: -1,
+                batchVersion: -1,
                 colorR: -1,
                 colorG: -1,
                 colorB: -1,
                 colorA: -1,
             };
+            sharedCopyStates.set(copyRenderData, copyState);
         }
 
-        const sourceData = sourceRenderData.data;
-        const copyData = copyRenderData.data;
-        const l = sourceData[0].x;
-        const b = sourceData[0].y;
-        const r = sourceData[1].x;
-        const t = sourceData[1].y;
-        if (!sharedState.initialized || sharedState.l !== l || sharedState.b !== b || sharedState.r !== r || sharedState.t !== t) {
-            copyData[0].x = l;
-            copyData[0].y = b;
-            copyData[1].x = r;
-            copyData[1].y = t;
+        if (copyState.rectVersion !== sourceState.rectVersion) {
+            const copyData = copyRenderData.data;
+            copyData[0].x = sourceState.l;
+            copyData[0].y = sourceState.b;
+            copyData[1].x = sourceState.r;
+            copyData[1].y = sourceState.t;
             copyRenderData.vertDirty = true;
-            sharedState.l = l;
-            sharedState.b = b;
-            sharedState.r = r;
-            sharedState.t = t;
+            copyState.rectVersion = sourceState.rectVersion;
         }
 
-        //对应原流程 updateUVs
-        const uv = frame.uv;
-        const vData = copyRenderData.chunk.vb;
-        if (!sharedState.initialized
-            || sharedState.uv0 !== uv[0] || sharedState.uv1 !== uv[1]
-            || sharedState.uv2 !== uv[2] || sharedState.uv3 !== uv[3]
-            || sharedState.uv4 !== uv[4] || sharedState.uv5 !== uv[5]
-            || sharedState.uv6 !== uv[6] || sharedState.uv7 !== uv[7]) {
-            vData[3] = uv[0];
-            vData[4] = uv[1];
-            vData[12] = uv[2];
-            vData[13] = uv[3];
-            vData[21] = uv[4];
-            vData[22] = uv[5];
-            vData[30] = uv[6];
-            vData[31] = uv[7];
-            sharedState.uv0 = uv[0];
-            sharedState.uv1 = uv[1];
-            sharedState.uv2 = uv[2];
-            sharedState.uv3 = uv[3];
-            sharedState.uv4 = uv[4];
-            sharedState.uv5 = uv[5];
-            sharedState.uv6 = uv[6];
-            sharedState.uv7 = uv[7];
+        if (copyState.uvVersion !== sourceState.uvVersion) {
+            const vData = copyRenderData.chunk.vb;
+            vData[3] = sourceState.uv0;
+            vData[4] = sourceState.uv1;
+            vData[12] = sourceState.uv2;
+            vData[13] = sourceState.uv3;
+            vData[21] = sourceState.uv4;
+            vData[22] = sourceState.uv5;
+            vData[30] = sourceState.uv6;
+            vData[31] = sourceState.uv7;
+            copyState.uvVersion = sourceState.uvVersion;
         }
-        //对应原流程 renderData.updateRenderData(sprite, frame)
-        // 同步 material / texture / node hash 信息
-        const material = sourceSprite.getRenderMaterial(0);
-        if (copyRenderData.passDirty || copyRenderData.material !== material || copyRenderData.blendHash !== sourceSprite.blendHash) {
+
+        if (copyState.batchVersion !== sourceState.batchVersion || copyRenderData.passDirty) {
             copyRenderData.updatePass(sourceSprite);
         }
-        if (copyRenderData.textureDirty || copyRenderData.frame !== frame || copyRenderData.textureHash !== frame.getHash()) {
-            copyRenderData.updateTexture(frame);
+        if (copyState.batchVersion !== sourceState.batchVersion || copyRenderData.textureDirty) {
+            copyRenderData.updateTexture(sourceState.frame);
         }
+        copyState.batchVersion = sourceState.batchVersion;
+
         if (copyRenderData.nodeDirty || copyRenderData.layer !== copySprite.node.layer) {
             copyRenderData.updateNode(copySprite);
         }
         if (copyRenderData.hashDirty) {
             copyRenderData.updateHash();
         }
-        /**
-         *  对应原流程
-         * sprite._updateColor()
-                -> assembler.updateColor(sprite)
-         */
+
         const color = copySprite.color;
-        if (!sharedState.initialized
-            || sharedState.colorR !== color.r || sharedState.colorG !== color.g
-            || sharedState.colorB !== color.b || sharedState.colorA !== color.a) {
+        if (copyState.colorR !== color.r || copyState.colorG !== color.g
+            || copyState.colorB !== color.b || copyState.colorA !== color.a) {
             this.updateColor(copySprite);
-            copyRenderDataAny._sharedOpacityDirty = true;
-            sharedState.colorR = color.r;
-            sharedState.colorG = color.g;
-            sharedState.colorB = color.b;
-            sharedState.colorA = color.a;
+            (copyRenderData as any)._sharedOpacityDirty = true;
+            copyState.colorR = color.r;
+            copyState.colorG = color.g;
+            copyState.colorB = color.b;
+            copyState.colorA = color.a;
         }
 
-        sharedState.initialized = true;
-        renderer.commitSharedComp(sourceSprite, copySprite, copyRenderData, frame, this, null);
+        renderer.commitSharedComp(sourceSprite, copySprite, copyRenderData, sourceState.frame, this, null);
 
         /**
          *  共享:
