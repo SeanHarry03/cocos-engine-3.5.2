@@ -1,7 +1,3 @@
-****#
-
-Sprite 相关知识点
-
 ## 1.chunk.bufferId
 
 这个 Sprite 的顶点数据位于 StaticVBAccessor 管理的第几个 MeshBuffer 中。
@@ -18,7 +14,7 @@ StaticVBAccessor
 └── ...
 ```
 
-定义在 [static-vb-accessor.ts (line 47)](./cocos/2d/renderer/static-vb-accessor.ts:47)：
+定义在 [static-vb-accessor.ts (line 47)](../cocos/2d/renderer/static-vb-accessor.ts)：
 
 ```
 export class StaticVBChunk {
@@ -59,7 +55,7 @@ A 和 B 位于同一个 MeshBuffer，只是占用不同区域；C 位于另一�
 
 每个 MeshBuffer 容量有限。分配 chunk 时会依次查找有足够空间的 MeshBuffer：
 
-[static-vb-accessor.ts (line 140)](./cocos/2d/renderer/static-vb-accessor.ts:140)
+[static-vb-accessor.ts (line 140)](../cocos/2d/renderer/static-vb-accessor.ts)
 
 如果已有 buffer 放不下，就创建新的 buffer：
 
@@ -77,7 +73,7 @@ bid = this._allocateBuffer();
 
 **为什么 batch hash 包含 bufferId**
 
-[render-data.ts (line 244)](./cocos/2d/renderer/render-data.ts:244)：
+[render-data.ts (line 244)](../cocos/2d/renderer/render-data.ts)：
 
 ```
 const bid = this.chunk ? this.chunk.bufferId : -1;
@@ -105,3 +101,4 @@ bufferId 不同     → 必须拆批
 所以不能简单从 hash 中删除 bufferId。
 
 需要特别注意：bufferId 不是全局 GPU Buffer ID，只是当前 StaticVBAccessor._buffers 数组中的下标。不同顶点格式对应不同的 accessor，各自都可能存在 bufferId = 0。
+
