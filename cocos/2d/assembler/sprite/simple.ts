@@ -41,14 +41,14 @@ for (let i = 0; i < 4; i++) {
  * 可通过 `UI.simple` 获取该组装器。
  */
 export const simple: IAssembler = {
-    createData (sprite: Sprite) {
+    createData(sprite: Sprite) {
         const renderData = sprite.requestRenderData();
         renderData.dataLength = 2;
         renderData.resize(4, 6);
         return renderData;
     },
 
-    updateRenderData (sprite: Sprite) {
+    updateRenderData(sprite: Sprite) {
         const frame = sprite.spriteFrame;
 
         // TODO: Material API design and export from editor could affect the material activation process
@@ -73,7 +73,7 @@ export const simple: IAssembler = {
         }
     },
 
-    updateWorldVerts (sprite: Sprite, chunk: StaticVBChunk) {
+    updateWorldVerts(sprite: Sprite, chunk: StaticVBChunk) {
         const renderData = sprite.renderData!;
         const vData = chunk.vb;
 
@@ -136,7 +136,7 @@ export const simple: IAssembler = {
         }
     },
 
-    fillBuffers (sprite: Sprite, renderer: IBatcher) {
+    fillBuffers(sprite: Sprite, renderer: IBatcher) {
         if (sprite === null) {
             return;
         }
@@ -166,7 +166,7 @@ export const simple: IAssembler = {
         // renderer.switchBufferAccessor().appendIndices(chunk);
     },
 
-    updateVertexData (sprite: Sprite) {
+    updateVertexData(sprite: Sprite) {
         const renderData: RenderData | null = sprite.renderData;
         if (!renderData) {
             return;
@@ -217,7 +217,7 @@ export const simple: IAssembler = {
         renderData.vertDirty = true;
     },
 
-    updateUVs (sprite: Sprite) {
+    updateUVs(sprite: Sprite) {
         if (!sprite.spriteFrame) return;
         const renderData = sprite.renderData!;
         const vData = renderData.chunk.vb;
@@ -232,7 +232,7 @@ export const simple: IAssembler = {
         vData[31] = uv[7];
     },
 
-    updateColor (sprite: Sprite) {
+    updateColor(sprite: Sprite) {
         const renderData = sprite.renderData!;
         const vData = renderData.chunk.vb;
         let colorOffset = 5;
@@ -247,5 +247,78 @@ export const simple: IAssembler = {
             vData[colorOffset + 2] = colorB;
             vData[colorOffset + 3] = colorA;
         }
+    },
+
+    fillSharedBuffers(sourceSprite: Sprite, copySprite: Sprite, renderer: IBatcher) {
+        if (sourceSprite === null || copySprite === null) {
+            return;
+        }
+        const frame = sourceSprite.spriteFrame;
+        if (!frame) {
+            return;
+        }
+
+        let sourceRenderData = sourceSprite.renderData!;
+        if (!sourceRenderData) {
+            sourceRenderData = this.createData(sourceSprite);
+        }
+
+        let copyRenderData = copySprite.renderData!;
+        if (!copyRenderData) {
+            copyRenderData = this.createData(copySprite);
+        }
+
+        if (sourceRenderData.vertDirty || sourceRenderData.passDirty || sourceRenderData.textureDirty || sourceRenderData.nodeDirty || sourceRenderData.hashDirty) {
+            this.updateRenderData(sourceSprite);
+        }
+        //对应原流程 updateVertexData
+        const sourceData = sourceRenderData.data;
+        const copyData = copyRenderData.data;
+        copyData[0].x = sourceData[0].x;
+        copyData[0].y = sourceData[0].y;
+        copyData[1].x = sourceData[1].x;
+        copyData[1].y = sourceData[1].y;
+
+        //对应原流程 updateUVs
+        const uv = frame.uv;
+        const vData = copyRenderData.chunk.vb;
+        vData[3] = uv[0];
+        vData[4] = uv[1];
+        vData[12] = uv[2];
+        vData[13] = uv[3];
+        vData[21] = uv[4];
+        vData[22] = uv[5];
+        vData[30] = uv[6];
+        vData[31] = uv[7];
+
+        //对应原流程 renderData.updateRenderData(sprite, frame)
+        // 同步 material / texture / node hash 信息
+        copyRenderData.updatePass(sourceSprite);
+        copyRenderData.updateTexture(frame);
+        copyRenderData.updateNode(copySprite);
+        copyRenderData.updateHash();
+        copyRenderData.vertDirty = true;
+
+        /**
+         *  对应原流程
+         * sprite._updateColor()
+                -> assembler.updateColor(sprite)
+         */
+        this.updateColor(copySprite);
+        //对应原流程 render.commitComp(this, this.renderData, this._spriteFrame, this._assembler, null);
+        renderer.commitSharedComp(sourceSprite, copySprite, copyRenderData, frame, this, null);
+
+        /**
+         *  共享:
+            图片形状
+            UV
+            纹理
+            材质
+
+            不共享:
+            copy 的 color
+            copy 的 alpha
+            copy 的 worldMatrix
+         */
     },
 };

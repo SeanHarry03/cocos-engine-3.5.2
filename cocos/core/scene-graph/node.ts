@@ -27,17 +27,18 @@ import {
     ccclass, editable, serializable, type,
 } from 'cc.decorator';
 import { EDITOR, JSB } from 'internal:constants';
-import { Layers } from './layers';
-import { NodeUIProperties } from './node-ui-properties';
-import { legacyCC } from '../global-exports';
-import { BaseNode, TRANSFORM_ON } from './base-node';
-import { approx, EPSILON, Mat3, Mat4, Quat, Vec3 } from '../math';
-import { NULL_HANDLE, NodePool, NodeView, NodeHandle  } from '../renderer/core/memory-pools';
-import { NodeSpace, TransformBit } from './node-enum';
-import { NativeNode } from '../renderer/native-scene';
-import { NodeEventType } from './node-event';
 import { CustomSerializable, editorExtrasTag, SerializationContext, SerializationOutput, serializeTag } from '../data';
+import { legacyCC } from '../global-exports';
+import { approx, EPSILON, Mat3, Mat4, Quat, Vec3 } from '../math';
 import { warnID } from '../platform/debug';
+import { NodeHandle, NodePool, NodeView, NULL_HANDLE } from '../renderer/core/memory-pools';
+import { NativeNode } from '../renderer/native-scene';
+import { fastRemoveAt } from '../utils/array';
+import { BaseNode, TRANSFORM_ON } from './base-node';
+import { Layers } from './layers';
+import { NodeSpace, TransformBit } from './node-enum';
+import { NodeEventType } from './node-event';
+import { NodeUIProperties } from './node-ui-properties';
 
 const v3_a = new Vec3();
 const q_a = new Quat();
@@ -48,7 +49,7 @@ const m3_scaling = new Mat3();
 const m4_1 = new Mat4();
 const dirtyNodes: any[] = [];
 const nativeDirtyNodes: any[] = [];
-const view_tmp:[Uint32Array, number] = [] as any;
+const view_tmp: [Uint32Array, number] = [] as any;
 class BookOfChange {
     private _chunks: Uint32Array[] = [];
     private _freelists: number[][] = [];
@@ -56,11 +57,11 @@ class BookOfChange {
     // these should match with native: cocos/renderer/pipeline/helper/SharedMemory.h Node.getHasChangedFlags
     private static CAPACITY_PER_CHUNK = 256;
 
-    constructor () {
+    constructor() {
         this._createChunk();
     }
 
-    public alloc () {
+    public alloc() {
         const chunkCount = this._freelists.length;
         for (let i = 0; i < chunkCount; ++i) {
             if (!this._freelists[i].length) continue;
@@ -70,7 +71,7 @@ class BookOfChange {
         return this._createView(chunkCount);
     }
 
-    public free (view: Uint32Array, idx: number) {
+    public free(view: Uint32Array, idx: number) {
         const chunkCount = this._freelists.length;
         for (let i = 0; i < chunkCount; ++i) {
             if (this._chunks[i] !== view) continue;
@@ -79,21 +80,21 @@ class BookOfChange {
         }
     }
 
-    public clear () {
+    public clear() {
         const chunkCount = this._chunks.length;
         for (let i = 0; i < chunkCount; ++i) {
             this._chunks[i].fill(0);
         }
     }
 
-    private _createChunk () {
+    private _createChunk() {
         this._chunks.push(new Uint32Array(BookOfChange.CAPACITY_PER_CHUNK));
         const freelist: number[] = [];
         for (let i = BookOfChange.CAPACITY_PER_CHUNK - 1; i >= 0; i--) freelist.push(i);
         this._freelists.push(freelist);
     }
 
-    private _createView (chunkIdx: number): [Uint32Array, number] {
+    private _createView(chunkIdx: number): [Uint32Array, number] {
         view_tmp[0] = this._chunks[chunkIdx];
         view_tmp[1] = this._freelists[chunkIdx].pop()!;
         return view_tmp;
@@ -203,14 +204,14 @@ export class Node extends BaseNode implements CustomSerializable {
 
     private _dirtyFlagsPri = TransformBit.NONE; // does the world transform need to update?
 
-    protected get _dirtyFlags () {
+    protected get _dirtyFlags() {
         if (JSB) {
             return this._nativeDirtyFlag[0];
         }
         return this._dirtyFlagsPri;
     }
 
-    protected set _dirtyFlags (flags) {
+    protected set _dirtyFlags(flags) {
         this._dirtyFlagsPri = flags;
         if (JSB) {
             this._nativeDirtyFlag[0] = flags;
@@ -226,7 +227,7 @@ export class Node extends BaseNode implements CustomSerializable {
     protected declare _nativeLayer: Uint32Array;
     protected declare _nativeDirtyFlag: Uint32Array;
 
-    protected _init () {
+    protected _init() {
         const [chunk, offset] = bookOfChange.alloc();
         this._hasChangedFlagsChunk = chunk;
         this._hasChangedFlagsOffset = offset;
@@ -259,7 +260,7 @@ export class Node extends BaseNode implements CustomSerializable {
         }
     }
 
-    constructor (name?: string) {
+    constructor(name?: string) {
         super(name);
         this._init();
     }
@@ -268,11 +269,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Determine whether the given object is a normal Node. Will return false if [[Scene]] given.
      * @zh 指定对象是否是普通的节点？如果传入 [[Scene]] 会返回 false。
      */
-    public static isNode (obj: unknown): obj is Node {
+    public static isNode(obj: unknown): obj is Node {
         return obj instanceof Node && (obj.constructor === Node || !(obj instanceof legacyCC.Scene));
     }
 
-    protected _onPreDestroy () {
+    protected _onPreDestroy() {
         const result = this._onPreDestroyBase();
         if (JSB) {
             if (this._nodeHandle) {
@@ -282,10 +283,33 @@ export class Node extends BaseNode implements CustomSerializable {
             this._nativeObj = null;
         }
         bookOfChange.free(this._hasChangedFlagsChunk, this._hasChangedFlagsOffset);
+
+        const copyChilds = this.copyChidrens;
+        if (copyChilds) {
+            for (const child of copyChilds) {
+                if (child._sharedRenderSource === this) {
+                    child._sharedRenderSource = null;
+                }
+            }
+            copyChilds.length = 0;
+            this.copyChidrens = null;
+        }
+
+        const sharedRenderSource = this._sharedRenderSource;
+        if (sharedRenderSource && sharedRenderSource.copyChidrens) {
+            const index = sharedRenderSource.copyChidrens.findIndex((item) => item.uuid === this.uuid);
+            if (index !== -1) {
+                fastRemoveAt(sharedRenderSource.copyChidrens, index);
+            }
+            if (sharedRenderSource.copyChidrens.length === 0) {
+                sharedRenderSource.copyChidrens = null;
+            }
+            this._sharedRenderSource = null;
+        }
         return result;
     }
 
-    get native (): any {
+    get native(): any {
         return this._nativeObj;
     }
 
@@ -294,11 +318,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 本地坐标系下的坐标
      */
     // @constget
-    public get position (): Readonly<Vec3> {
+    public get position(): Readonly<Vec3> {
         return this._lpos;
     }
 
-    public set position (val: Readonly<Vec3>) {
+    public set position(val: Readonly<Vec3>) {
         this.setPosition(val as Vec3);
     }
 
@@ -307,12 +331,12 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 世界坐标系下的坐标
      */
     // @constget
-    public get worldPosition (): Readonly<Vec3> {
+    public get worldPosition(): Readonly<Vec3> {
         this.updateWorldTransform();
         return this._pos;
     }
 
-    public set worldPosition (val: Readonly<Vec3>) {
+    public set worldPosition(val: Readonly<Vec3>) {
         this.setWorldPosition(val as Vec3);
     }
 
@@ -321,11 +345,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 本地坐标系下的旋转，用四元数表示
      */
     // @constget
-    public get rotation (): Readonly<Quat> {
+    public get rotation(): Readonly<Quat> {
         return this._lrot;
     }
 
-    public set rotation (val: Readonly<Quat>) {
+    public set rotation(val: Readonly<Quat>) {
         this.setRotation(val as Quat);
     }
 
@@ -334,11 +358,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 本地坐标系下的旋转，用欧拉角表示
      */
     @type(Vec3)
-    set eulerAngles (val: Readonly<Vec3>) {
+    set eulerAngles(val: Readonly<Vec3>) {
         this.setRotationFromEuler(val.x, val.y, val.z);
     }
 
-    get eulerAngles () {
+    get eulerAngles() {
         if (this._eulerDirty) {
             Quat.toEuler(this._euler, this._lrot);
             this._eulerDirty = false;
@@ -351,11 +375,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 本地坐标系下的旋转，用欧拉角表示，但是限定在 z 轴上。
      */
     @editable
-    get angle () {
+    get angle() {
         return this._euler.z;
     }
 
-    set angle (val: number) {
+    set angle(val: number) {
         Vec3.set(this._euler, 0, 0, val);
         Quat.fromAngleZ(this._lrot, val);
         this._eulerDirty = false;
@@ -371,12 +395,12 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 世界坐标系下的旋转，用四元数表示
      */
     // @constget
-    public get worldRotation (): Readonly<Quat> {
+    public get worldRotation(): Readonly<Quat> {
         this.updateWorldTransform();
         return this._rot;
     }
 
-    public set worldRotation (val: Readonly<Quat>) {
+    public set worldRotation(val: Readonly<Quat>) {
         this.setWorldRotation(val as Quat);
     }
 
@@ -385,11 +409,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 本地坐标系下的缩放
      */
     // @constget
-    public get scale (): Readonly<Vec3> {
+    public get scale(): Readonly<Vec3> {
         return this._lscale;
     }
 
-    public set scale (val: Readonly<Vec3>) {
+    public set scale(val: Readonly<Vec3>) {
         this.setScale(val as Vec3);
     }
 
@@ -398,12 +422,12 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 世界坐标系下的缩放
      */
     // @constget
-    public get worldScale (): Readonly<Vec3> {
+    public get worldScale(): Readonly<Vec3> {
         this.updateWorldTransform();
         return this._scale;
     }
 
-    public set worldScale (val: Readonly<Vec3>) {
+    public set worldScale(val: Readonly<Vec3>) {
         this.setWorldScale(val as Vec3);
     }
 
@@ -411,7 +435,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Local transformation matrix
      * @zh 本地坐标系变换矩阵
      */
-    public set matrix (val: Readonly<Mat4>) {
+    public set matrix(val: Readonly<Mat4>) {
         Mat4.toRTS(val, this._lrot, this._lpos, this._lscale);
         this.invalidateChildren(TransformBit.TRS);
         this._eulerDirty = true;
@@ -425,7 +449,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 世界坐标系变换矩阵
      */
     // @constget
-    public get worldMatrix (): Readonly<Mat4> {
+    public get worldMatrix(): Readonly<Mat4> {
         this.updateWorldTransform();
         return this._mat;
     }
@@ -434,11 +458,11 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en The vector representing forward direction in local coordinate system, it's the minus z direction by default
      * @zh 当前节点面向的前方方向，默认前方为 -z 方向
      */
-    get forward (): Vec3 {
+    get forward(): Vec3 {
         return Vec3.transformQuat(new Vec3(), Vec3.FORWARD, this.worldRotation);
     }
 
-    set forward (dir: Vec3) {
+    set forward(dir: Vec3) {
         const len = dir.length();
         Vec3.multiplyScalar(v3_a, dir, -1 / len);
         Quat.fromViewUp(q_a, v3_a);
@@ -449,7 +473,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Return the up direction vertor of this node in world space.
      * @zh 返回当前节点在世界空间中朝上的方向向量
      */
-    get up (): Vec3 {
+    get up(): Vec3 {
         return Vec3.transformQuat(new Vec3(), Vec3.UP, this.worldRotation);
     }
 
@@ -457,7 +481,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Return the right direction vector of this node in world space.
      * @zh 返回当前节点在世界空间中朝右的方向向量
      */
-    get right (): Vec3 {
+    get right(): Vec3 {
         return Vec3.transformQuat(new Vec3(), Vec3.RIGHT, this.worldRotation);
     }
 
@@ -466,7 +490,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 节点所属层，主要影响射线检测、物理碰撞等，参考 [[Layers]]
      */
     @editable
-    set layer (l) {
+    set layer(l) {
         this._layer = l;
         if (JSB) {
             this._nativeLayer[0] = this._layer;
@@ -478,7 +502,7 @@ export class Node extends BaseNode implements CustomSerializable {
         this.emit(NodeEventType.LAYER_CHANGED, this._layer);
     }
 
-    get layer () {
+    get layer() {
         return this._layer;
     }
 
@@ -486,18 +510,18 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Whether the node's transformation have changed during the current frame.
      * @zh 这个节点的空间变换信息在当前帧内是否有变过？
      */
-    get hasChangedFlags () {
+    get hasChangedFlags() {
         return this._hasChangedFlagsChunk[this._hasChangedFlagsOffset] as TransformBit;
     }
 
-    set hasChangedFlags (val: number) {
+    set hasChangedFlags(val: number) {
         this._hasChangedFlagsChunk[this._hasChangedFlagsOffset] = val;
     }
 
     /**
      * @internal
      */
-    public [serializeTag] (serializationOutput: SerializationOutput, context: SerializationContext) {
+    public [serializeTag](serializationOutput: SerializationOutput, context: SerializationContext) {
         if (!EDITOR) {
             serializationOutput.writeThis();
             return;
@@ -545,7 +569,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param value Parent node
      * @param keepWorldTransform Whether keep node's current world transform unchanged after this operation
      */
-    public setParent (value: this | null, keepWorldTransform = false) {
+    public setParent(value: this | null, keepWorldTransform = false) {
         if (keepWorldTransform) { this.updateWorldTransform(); }
         super.setParent(value, keepWorldTransform);
         if (JSB) {
@@ -556,7 +580,7 @@ export class Node extends BaseNode implements CustomSerializable {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _onSetParent (oldParent: this | null, keepWorldTransform: boolean) {
+    public _onSetParent(oldParent: this | null, keepWorldTransform: boolean) {
         super._onSetParent(oldParent, keepWorldTransform);
         if (keepWorldTransform) {
             const parent = this._parent;
@@ -581,7 +605,7 @@ export class Node extends BaseNode implements CustomSerializable {
         this.invalidateChildren(TransformBit.TRS);
     }
 
-    protected _onHierarchyChanged (oldParent: this | null) {
+    protected _onHierarchyChanged(oldParent: this | null) {
         this.eventProcessor.reattach();
         super._onHierarchyChangedBase(oldParent);
     }
@@ -589,7 +613,7 @@ export class Node extends BaseNode implements CustomSerializable {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _onBatchCreated (dontSyncChildPrefab: boolean) {
+    public _onBatchCreated(dontSyncChildPrefab: boolean) {
         if (JSB) {
             this._nativeLayer[0] = this._layer;
             this._nativeObj!.setParent(this.parent?.native);
@@ -606,7 +630,7 @@ export class Node extends BaseNode implements CustomSerializable {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _onBeforeSerialize () {
+    public _onBeforeSerialize() {
         // eslint-disable-next-line @typescript-eslint/no-unused-expressions
         this.eulerAngles; // make sure we save the correct eulerAngles
     }
@@ -614,7 +638,7 @@ export class Node extends BaseNode implements CustomSerializable {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _onPostActivated (active: boolean) {
+    public _onPostActivated(active: boolean) {
         if (active) { // activated
             this._eventProcessor.setEnabled(true);
             // in case transform updated during deactivated period
@@ -640,7 +664,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param trans The increment on position
      * @param ns The operation coordinate space
      */
-    public translate (trans: Vec3, ns?: NodeSpace): void {
+    public translate(trans: Vec3, ns?: NodeSpace): void {
         const space = ns || NodeSpace.LOCAL;
         if (space === NodeSpace.LOCAL) {
             Vec3.transformQuat(v3_a, trans, this._lrot);
@@ -673,7 +697,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param rot The increment on rotation
      * @param ns The operation coordinate space
      */
-    public rotate (rot: Quat, ns?: NodeSpace): void {
+    public rotate(rot: Quat, ns?: NodeSpace): void {
         const space = ns || NodeSpace.LOCAL;
         Quat.normalize(q_a, rot);
 
@@ -699,7 +723,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param pos Target position
      * @param up Up direction
      */
-    public lookAt (pos: Readonly<Vec3>, up?: Readonly<Vec3>): void {
+    public lookAt(pos: Readonly<Vec3>, up?: Readonly<Vec3>): void {
         this.getWorldPosition(v3_a);
         Vec3.subtract(v3_a, v3_a, pos);
         Vec3.normalize(v3_a, v3_a);
@@ -707,7 +731,7 @@ export class Node extends BaseNode implements CustomSerializable {
         this.setWorldRotation(q_a);
     }
 
-    protected _setDirtyNode (idx: number, currNode: this) {
+    protected _setDirtyNode(idx: number, currNode: this) {
         dirtyNodes[idx] = currNode;
         if (JSB) {
             nativeDirtyNodes[idx] = currNode.native;
@@ -720,14 +744,14 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 递归标记节点世界变换为 dirty
      * @param dirtyBit The dirty bits to setup to children, can be composed with multiple dirty bits
      */
-    public invalidateChildren (dirtyBit: TransformBit) {
+    public invalidateChildren(dirtyBit: TransformBit) {
         let i = 0;
         let j = 0;
         let l = 0;
         let cur: this;
-        let c : this;
+        let c: this;
         let flag = 0;
-        let children:this[];
+        let children: this[];
         let hasChangedFlags = 0;
         const childDirtyBit = dirtyBit | TransformBit.POSITION;
 
@@ -743,7 +767,7 @@ export class Node extends BaseNode implements CustomSerializable {
         while (i >= 0) {
             cur = dirtyNodes[i--];
             hasChangedFlags = cur._hasChangedFlags[0];
-            flag =  cur._dirtyFlagsPri;
+            flag = cur._dirtyFlagsPri;
             if (cur.isValid && (flag & hasChangedFlags & dirtyBit) !== dirtyBit) {
                 // NOTE: inflate procedure
                 // ```
@@ -783,7 +807,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @en Update the world transform information if outdated
      * @zh 更新节点的世界变换信息
      */
-    public updateWorldTransform () {
+    public updateWorldTransform() {
         if (!this._dirtyFlags) { return; }
         // we need to recursively iterate this
         // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -850,7 +874,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 设置本地坐标
      * @param position Target position
      */
-    public setPosition (position: Readonly<Vec3>): void;
+    public setPosition(position: Readonly<Vec3>): void;
 
     /**
      * @en Set position in local coordinate system
@@ -859,9 +883,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis position
      * @param z Z axis position
      */
-    public setPosition (x: number, y: number, z?: number): void;
+    public setPosition(x: number, y: number, z?: number): void;
 
-    public setPosition (val: Readonly<Vec3> | number, y?: number, z?: number): void {
+    public setPosition(val: Readonly<Vec3> | number, y?: number, z?: number): void {
         if (y === undefined && z === undefined) {
             Vec3.copy(this._lpos, val as Vec3);
         } else if (z === undefined) {
@@ -882,7 +906,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out vector
      * @return If `out` given, the return value equals to `out`, otherwise a new vector will be generated and return
      */
-    public getPosition (out?: Vec3): Vec3 {
+    public getPosition(out?: Vec3): Vec3 {
         if (out) {
             return Vec3.set(out, this._lpos.x, this._lpos.y, this._lpos.z);
         }
@@ -894,7 +918,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 用四元数设置本地旋转
      * @param rotation Rotation in quaternion
      */
-    public setRotation (rotation: Readonly<Quat>): void;
+    public setRotation(rotation: Readonly<Quat>): void;
 
     /**
      * @en Set rotation in local coordinate system with a quaternion representing the rotation
@@ -904,9 +928,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param z Z value in quaternion
      * @param w W value in quaternion
      */
-    public setRotation (x: number, y: number, z: number, w: number): void;
+    public setRotation(x: number, y: number, z: number, w: number): void;
 
-    public setRotation (val: Readonly<Quat> | number, y?: number, z?: number, w?: number) {
+    public setRotation(val: Readonly<Quat> | number, y?: number, z?: number, w?: number) {
         if (y === undefined || z === undefined || w === undefined) {
             Quat.copy(this._lrot, val as Readonly<Quat>);
         } else {
@@ -925,7 +949,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 用欧拉角设置本地旋转
      * @param rotation Rotation in vector
      */
-    public setRotationFromEuler (rotation: Vec3): void;
+    public setRotationFromEuler(rotation: Vec3): void;
 
     /**
      * @en Set rotation in local coordinate system with euler angles
@@ -934,9 +958,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis rotation
      * @param z Z axis rotation
      */
-    public setRotationFromEuler (x: number, y: number, zOpt?: number): void;
+    public setRotationFromEuler(x: number, y: number, zOpt?: number): void;
 
-    public setRotationFromEuler (val: Vec3 | number, y?: number, zOpt?: number): void {
+    public setRotationFromEuler(val: Vec3 | number, y?: number, zOpt?: number): void {
         const z = zOpt === undefined ? this._euler.z : zOpt;
 
         if (y === undefined) {
@@ -961,7 +985,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out quaternion
      * @return If `out` given, the return value equals to `out`, otherwise a new quaternion will be generated and return
      */
-    public getRotation (out?: Quat): Quat {
+    public getRotation(out?: Quat): Quat {
         if (out) {
             return Quat.set(out, this._lrot.x, this._lrot.y, this._lrot.z, this._lrot.w);
         }
@@ -973,7 +997,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 设置本地缩放
      * @param scale Target scale
      */
-    public setScale (scale: Readonly<Vec3>): void;
+    public setScale(scale: Readonly<Vec3>): void;
 
     /**
      * @en Set scale in local coordinate system
@@ -982,9 +1006,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis scale
      * @param z Z axis scale
      */
-    public setScale (x: number, y: number, z?: number): void;
+    public setScale(x: number, y: number, z?: number): void;
 
-    public setScale (val: Readonly<Vec3> | number, y?: number, z?: number) {
+    public setScale(val: Readonly<Vec3> | number, y?: number, z?: number) {
         if (y === undefined && z === undefined) {
             Vec3.copy(this._lscale, val as Vec3);
         } else if (z === undefined) {
@@ -1005,7 +1029,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out vector
      * @return If `out` given, the return value equals to `out`, otherwise a new vector will be generated and return
      */
-    public getScale (out?: Vec3): Vec3 {
+    public getScale(out?: Vec3): Vec3 {
         if (out) {
             return Vec3.set(out, this._lscale.x, this._lscale.y, this._lscale.z);
         }
@@ -1018,7 +1042,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out The result point in local coordinate system will be stored in this vector
      * @param p A position in world coordinate system
      */
-    public inverseTransformPoint (out: Vec3, p: Vec3) {
+    public inverseTransformPoint(out: Vec3, p: Vec3) {
         Vec3.copy(out, p);
         // we need to recursively iterate this
         // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -1040,7 +1064,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 设置世界坐标
      * @param position Target position
      */
-    public setWorldPosition (position: Vec3): void;
+    public setWorldPosition(position: Vec3): void;
 
     /**
      * @en Set position in world coordinate system
@@ -1049,9 +1073,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis position
      * @param z Z axis position
      */
-    public setWorldPosition (x: number, y: number, z: number): void;
+    public setWorldPosition(x: number, y: number, z: number): void;
 
-    public setWorldPosition (val: Vec3 | number, y?: number, z?: number) {
+    public setWorldPosition(val: Vec3 | number, y?: number, z?: number) {
         if (y === undefined || z === undefined) {
             Vec3.copy(this._pos, val as Vec3);
         } else {
@@ -1083,7 +1107,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out vector
      * @return If `out` given, the return value equals to `out`, otherwise a new vector will be generated and return
      */
-    public getWorldPosition (out?: Vec3): Vec3 {
+    public getWorldPosition(out?: Vec3): Vec3 {
         this.updateWorldTransform();
         if (out) {
             return Vec3.copy(out, this._pos);
@@ -1096,7 +1120,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 用四元数设置世界坐标系下的旋转
      * @param rotation Rotation in quaternion
      */
-    public setWorldRotation (rotation: Quat): void;
+    public setWorldRotation(rotation: Quat): void;
 
     /**
      * @en Set rotation in world coordinate system with a quaternion representing the rotation
@@ -1106,9 +1130,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param z Z value in quaternion
      * @param w W value in quaternion
      */
-    public setWorldRotation (x: number, y: number, z: number, w: number): void;
+    public setWorldRotation(x: number, y: number, z: number, w: number): void;
 
-    public setWorldRotation (val: Quat | number, y?: number, z?: number, w?: number) {
+    public setWorldRotation(val: Quat | number, y?: number, z?: number, w?: number) {
         if (y === undefined || z === undefined || w === undefined) {
             Quat.copy(this._rot, val as Quat);
         } else {
@@ -1135,7 +1159,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis rotation
      * @param z Z axis rotation
      */
-    public setWorldRotationFromEuler (x: number, y: number, z: number): void {
+    public setWorldRotationFromEuler(x: number, y: number, z: number): void {
         Quat.fromEuler(this._rot, x, y, z);
         if (this._parent) {
             this._parent.updateWorldTransform();
@@ -1157,7 +1181,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out quaternion
      * @return If `out` given, the return value equals to `out`, otherwise a new quaternion will be generated and return
      */
-    public getWorldRotation (out?: Quat): Quat {
+    public getWorldRotation(out?: Quat): Quat {
         this.updateWorldTransform();
         if (out) {
             return Quat.copy(out, this._rot);
@@ -1170,7 +1194,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh 设置世界坐标系下的缩放
      * @param scale Target scale
      */
-    public setWorldScale (scale: Vec3): void;
+    public setWorldScale(scale: Vec3): void;
 
     /**
      * @en Set scale in world coordinate system
@@ -1179,9 +1203,9 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param y Y axis scale
      * @param z Z axis scale
      */
-    public setWorldScale (x: number, y: number, z: number): void;
+    public setWorldScale(x: number, y: number, z: number): void;
 
-    public setWorldScale (val: Vec3 | number, y?: number, z?: number) {
+    public setWorldScale(val: Vec3 | number, y?: number, z?: number) {
         if (y === undefined || z === undefined) {
             Vec3.copy(this._scale, val as Vec3);
         } else {
@@ -1215,7 +1239,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out vector
      * @return If `out` given, the return value equals to `out`, otherwise a new vector will be generated and return
      */
-    public getWorldScale (out?: Vec3): Vec3 {
+    public getWorldScale(out?: Vec3): Vec3 {
         this.updateWorldTransform();
         if (out) {
             return Vec3.copy(out, this._scale);
@@ -1229,7 +1253,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out matrix
      * @return If `out` given, the return value equals to `out`, otherwise a new matrix will be generated and return
      */
-    public getWorldMatrix (out?: Mat4): Mat4 {
+    public getWorldMatrix(out?: Mat4): Mat4 {
         this.updateWorldTransform();
         const target = out || new Mat4();
         return Mat4.copy(target, this._mat);
@@ -1241,7 +1265,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out matrix
      * @return If `out` given, the return value equals to `out`, otherwise a new matrix will be generated and return
      */
-    public getWorldRS (out?: Mat4): Mat4 {
+    public getWorldRS(out?: Mat4): Mat4 {
         this.updateWorldTransform();
         const target = out || new Mat4();
         Mat4.copy(target, this._mat);
@@ -1255,7 +1279,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param out Set the result to out matrix
      * @return If `out` given, the return value equals to `out`, otherwise a new matrix will be generated and return
      */
-    public getWorldRT (out?: Mat4): Mat4 {
+    public getWorldRT(out?: Mat4): Mat4 {
         this.updateWorldTransform();
         const target = out || new Mat4();
         return Mat4.fromRT(target, this._rot, this._pos);
@@ -1268,7 +1292,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @param pos The position
      * @param scale The scale
      */
-    public setRTS (rot?: Quat | Vec3, pos?: Vec3, scale?: Vec3) {
+    public setRTS(rot?: Quat | Vec3, pos?: Vec3, scale?: Vec3) {
         let dirtyBit: TransformBit = 0;
         if (rot) {
             dirtyBit |= TransformBit.ROTATION;
@@ -1307,7 +1331,7 @@ export class Node extends BaseNode implements CustomSerializable {
      *
      * @param recursive Whether pause system events recursively for the child node tree
      */
-    public pauseSystemEvents (recursive: boolean): void {
+    public pauseSystemEvents(recursive: boolean): void {
         this._eventProcessor.setEnabled(false, recursive);
     }
 
@@ -1322,7 +1346,7 @@ export class Node extends BaseNode implements CustomSerializable {
      *
      * @param recursive Whether resume system events recursively for the child node tree
      */
-    public resumeSystemEvents (recursive: boolean): void {
+    public resumeSystemEvents(recursive: boolean): void {
         this._eventProcessor.setEnabled(true, recursive);
     }
 
@@ -1332,7 +1356,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh
      * 清除所有节点的脏标记。
      */
-    public static resetHasChangedFlags () {
+    public static resetHasChangedFlags() {
         bookOfChange.clear();
     }
 
@@ -1342,7 +1366,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh
      * 清除节点数组
      */
-    public static clearNodeArray () {
+    public static clearNodeArray() {
         if (Node.ClearFrame < Node.ClearRound && !EDITOR) {
             Node.ClearFrame++;
         } else {
@@ -1359,7 +1383,7 @@ export class Node extends BaseNode implements CustomSerializable {
      * @zh
      * 获得当前节点在 hierarchy 中的完整路径。
      */
-    public getPathInHierarchy (): string {
+    public getPathInHierarchy(): string {
         let result = this.name;
         let curNode: BaseNode | null = this.parent;
         while (curNode && curNode instanceof Node) {
@@ -1369,6 +1393,61 @@ export class Node extends BaseNode implements CustomSerializable {
 
         return result;
     }
+
+    //#region 自定义引擎功能
+
+
+    private _isShareNode: boolean = false;
+
+    /**是否是共享节点 */
+    public get isShareNode() {
+        return this._isShareNode
+    }
+
+    public set isShareNode(value) {
+        this._isShareNode = value;
+    }
+
+    public copyChidrens: Node[] | null = null;
+
+    public addCopyChildren(node: Node) {
+        if (node === this) return;
+
+        const oldSource = node._sharedRenderSource;
+        if (oldSource && oldSource !== this) {
+            oldSource.removeCopyChildren(node);
+        }
+
+        const nodes = (this.copyChidrens || (this.copyChidrens = []));
+        const index = nodes.findIndex((item) => item.uuid === node.uuid);
+        if (index !== -1) return;
+
+        nodes.push(node);
+        // node.setParent(this);
+        node._sharedRenderSource = this;
+    }
+
+    public removeCopyChildren(node: Node) {
+        const nodes = this.copyChidrens;
+        if (!nodes) return;
+        const index = nodes.findIndex((item) => item.uuid === node.uuid);
+        if (index !== -1) {
+            fastRemoveAt(nodes, index);
+            if (node._sharedRenderSource === this) {
+                node._sharedRenderSource = null;
+            }
+            if (nodes.length === 0) {
+                this.copyChidrens = null;
+            }
+        }
+    }
+
+
+
+    /**共享节点源数据 */
+    public _sharedRenderSource: Node | null = null;
+
+    //#endregion
 }
 
 legacyCC.Node = Node;

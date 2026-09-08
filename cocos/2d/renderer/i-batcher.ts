@@ -39,6 +39,14 @@ export interface IBatcher {
     switchBufferAccessor (attributes?: Attribute[]): StaticVBAccessor;
 
     commitComp (comp: Renderable2D, renderData: BaseRenderData|null, frame: TextureBase | SpriteFrame | null, assembler: any, transform: Node | null);
+    commitSharedComp (
+        sourceComp: Renderable2D,
+        copyComp: Renderable2D,
+        renderData: BaseRenderData|null,
+        frame: TextureBase | SpriteFrame | null,
+        assembler: any,
+        transform: Node | null,
+    );
     commitModel (comp: UIMeshRenderer | Renderable2D, model: Model | null, mat: Material | null);
 
     setupStaticBatch (staticComp: UIStaticBatch, bufferAccessor: StaticVBAccessor);

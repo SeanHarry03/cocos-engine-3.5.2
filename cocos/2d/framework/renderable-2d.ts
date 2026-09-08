@@ -503,6 +503,10 @@ export class Renderable2D extends RenderableComponent {
             this.renderData.textureDirty = true;
         }
     }
+
+    public get assembler ():IAssembler | null {
+        return this._assembler;
+    }
 }
 
 legacyCC.internal.Renderable2D = Renderable2D;
