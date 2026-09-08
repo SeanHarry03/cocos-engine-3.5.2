@@ -36,6 +36,8 @@ for (let i = 0; i < 4; i++) {
     vec3_temps.push(new Vec3());
 }
 
+const SHARED_SIMPLE_STATE = '_sharedSimpleState';
+
 /**
  * simple 组装器
  * 可通过 `UI.simple` 获取该组装器。
@@ -272,40 +274,108 @@ export const simple: IAssembler = {
             this.updateRenderData(sourceSprite);
         }
         //对应原流程 updateVertexData
+        const copyRenderDataAny = copyRenderData as any;
+        let sharedState = copyRenderDataAny[SHARED_SIMPLE_STATE];
+        if (!sharedState || sharedState.copySprite !== copySprite || sharedState.chunk !== copyRenderData.chunk) {
+            sharedState = copyRenderDataAny[SHARED_SIMPLE_STATE] = {
+                copySprite,
+                chunk: copyRenderData.chunk,
+                initialized: false,
+                l: 0,
+                b: 0,
+                r: 0,
+                t: 0,
+                uv0: 0,
+                uv1: 0,
+                uv2: 0,
+                uv3: 0,
+                uv4: 0,
+                uv5: 0,
+                uv6: 0,
+                uv7: 0,
+                colorR: -1,
+                colorG: -1,
+                colorB: -1,
+                colorA: -1,
+            };
+        }
+
         const sourceData = sourceRenderData.data;
         const copyData = copyRenderData.data;
-        copyData[0].x = sourceData[0].x;
-        copyData[0].y = sourceData[0].y;
-        copyData[1].x = sourceData[1].x;
-        copyData[1].y = sourceData[1].y;
+        const l = sourceData[0].x;
+        const b = sourceData[0].y;
+        const r = sourceData[1].x;
+        const t = sourceData[1].y;
+        if (!sharedState.initialized || sharedState.l !== l || sharedState.b !== b || sharedState.r !== r || sharedState.t !== t) {
+            copyData[0].x = l;
+            copyData[0].y = b;
+            copyData[1].x = r;
+            copyData[1].y = t;
+            copyRenderData.vertDirty = true;
+            sharedState.l = l;
+            sharedState.b = b;
+            sharedState.r = r;
+            sharedState.t = t;
+        }
 
         //对应原流程 updateUVs
         const uv = frame.uv;
         const vData = copyRenderData.chunk.vb;
-        vData[3] = uv[0];
-        vData[4] = uv[1];
-        vData[12] = uv[2];
-        vData[13] = uv[3];
-        vData[21] = uv[4];
-        vData[22] = uv[5];
-        vData[30] = uv[6];
-        vData[31] = uv[7];
-
+        if (!sharedState.initialized
+            || sharedState.uv0 !== uv[0] || sharedState.uv1 !== uv[1]
+            || sharedState.uv2 !== uv[2] || sharedState.uv3 !== uv[3]
+            || sharedState.uv4 !== uv[4] || sharedState.uv5 !== uv[5]
+            || sharedState.uv6 !== uv[6] || sharedState.uv7 !== uv[7]) {
+            vData[3] = uv[0];
+            vData[4] = uv[1];
+            vData[12] = uv[2];
+            vData[13] = uv[3];
+            vData[21] = uv[4];
+            vData[22] = uv[5];
+            vData[30] = uv[6];
+            vData[31] = uv[7];
+            sharedState.uv0 = uv[0];
+            sharedState.uv1 = uv[1];
+            sharedState.uv2 = uv[2];
+            sharedState.uv3 = uv[3];
+            sharedState.uv4 = uv[4];
+            sharedState.uv5 = uv[5];
+            sharedState.uv6 = uv[6];
+            sharedState.uv7 = uv[7];
+        }
         //对应原流程 renderData.updateRenderData(sprite, frame)
         // 同步 material / texture / node hash 信息
-        copyRenderData.updatePass(sourceSprite);
-        copyRenderData.updateTexture(frame);
-        copyRenderData.updateNode(copySprite);
-        copyRenderData.updateHash();
-        copyRenderData.vertDirty = true;
-
+        const material = sourceSprite.getRenderMaterial(0);
+        if (copyRenderData.passDirty || copyRenderData.material !== material || copyRenderData.blendHash !== sourceSprite.blendHash) {
+            copyRenderData.updatePass(sourceSprite);
+        }
+        if (copyRenderData.textureDirty || copyRenderData.frame !== frame || copyRenderData.textureHash !== frame.getHash()) {
+            copyRenderData.updateTexture(frame);
+        }
+        if (copyRenderData.nodeDirty || copyRenderData.layer !== copySprite.node.layer) {
+            copyRenderData.updateNode(copySprite);
+        }
+        if (copyRenderData.hashDirty) {
+            copyRenderData.updateHash();
+        }
         /**
          *  对应原流程
          * sprite._updateColor()
                 -> assembler.updateColor(sprite)
          */
-        this.updateColor(copySprite);
-        //对应原流程 render.commitComp(this, this.renderData, this._spriteFrame, this._assembler, null);
+        const color = copySprite.color;
+        if (!sharedState.initialized
+            || sharedState.colorR !== color.r || sharedState.colorG !== color.g
+            || sharedState.colorB !== color.b || sharedState.colorA !== color.a) {
+            this.updateColor(copySprite);
+            copyRenderDataAny._sharedOpacityDirty = true;
+            sharedState.colorR = color.r;
+            sharedState.colorG = color.g;
+            sharedState.colorB = color.b;
+            sharedState.colorA = color.a;
+        }
+
+        sharedState.initialized = true;
         renderer.commitSharedComp(sourceSprite, copySprite, copyRenderData, frame, this, null);
 
         /**
